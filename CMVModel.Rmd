@@ -1,0 +1,39 @@
+---
+title: "Constructing Naive TCR Training Sets"
+author: "Ben Margetts"
+date: "09/10/2017"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document: default
+---
+
+```{r}
+library(aphid)
+library(stringi)
+library(ape)
+```
+
+```{r}
+wd <- '/Users/benmargetts/Google/TCR/HMMs/Data/CMVVDJDB'
+setwd(wd)
+
+dat <- read.csv('14_48-24-10-2017-SearchTable.txt', header = T, stringsAsFactors = F, sep = '\t')
+dat <- dat[,2]
+```
+
+
+```{r}
+#prep cdr3 sequences
+dat.seqs <- sapply(as.list(as.character(unlist(dat))), strsplit, split='')
+
+dat.PHMM <- derivePHMM(dat.seqs, residues = "AMINO", seqweights = NULL)
+
+plot.PHMM(dat.PHMM)
+```
+
+```{r}
+all <- cdr3Dat[1]
+all <- unique(all)
+write.table(all, paste(out, '/all.csv', sep = ''), col.names = F, row.names = F, sep = ',')
+```

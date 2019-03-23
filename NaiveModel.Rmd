@@ -1,0 +1,55 @@
+---
+title: "Naive Model"
+author: "Ben Margetts"
+date: "14/11/2017"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document: default
+---
+
+```{r}
+library(aphid)
+library(stringi)
+library(ape)
+```
+
+```{r}
+wd <- '~/Google/TCR/HMMs/Data/NaiveModel'
+setwd(wd)
+
+dat <- read.csv('singlets.csv', stringsAsFactors = F, sep = ',', header=F)
+```
+
+
+```{r}
+#test
+#temp <- dat[sample(seq(1,length(dat$V1)),10),]
+start_time <- Sys.time()
+
+temp <- dat[seq(1,10),]
+
+temp.seqs <- sapply(as.list(as.character(unlist(temp))), strsplit, split='')
+
+temp.PHMM <- derivePHMM(temp.seqs, refine = 'BaumWelch', residues = "AMINO", seqweights = NULL, maxiter = 1000, cores = 2)
+end_time <- Sys.time()
+print(end_time - start_time)
+```
+
+
+```{r}
+#prep cdr3 sequences
+dat.seqs <- sapply(as.list(as.character(unlist(dat))), strsplit, split='')
+
+
+#dat.PHMM <- derivePHMM(dat.seqs, residues = "AMINO", seqweights = NULL)
+dat.PHMM <- derivePHMM(dat.seqs, refine = 'BaumWelch', residues = "AMINO", seqweights = NULL, maxiter = 5000, cores = 2)
+
+plot.PHMM(dat.PHMM)
+```
+
+```{r}
+setwd(wd)
+
+writePHMM(dat.PHMM, 'NaiveSingletsModel')
+```

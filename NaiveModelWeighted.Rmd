@@ -1,0 +1,165 @@
+---
+title: "Naive Model Weighted"
+author: "Ben Margetts"
+date: "14/11/2017"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document: default
+---
+
+```{r}
+library(aphid)
+library(stringi)
+library(ape)
+```
+
+
+# Read in naive model
+
+```{r}
+wd <- '/Users/benmargetts/Google/TCR/HMMs/Data/NaiveModel'
+setwd(wd)
+
+dat.PHMM <- readPHMM('NaiveSingletsModel')
+```
+
+
+# Read in training seqs
+
+```{r}
+setwd(wd)
+
+dat <- read.csv('singlets.csv', header = F, stringsAsFactors = F, sep = '\t')
+dat$score <- NA
+colnames(dat) <- c('Seqs', 'Score')
+```
+
+
+# Fit each traning seq to model, store log odds ratio
+
+```{r}
+for (seq in dat$Seqs){
+  
+  #fit to model
+  score <- forward.PHMM(dat.PHMM, strsplit(seq, split=''))
+  
+  #save score
+  dat$Score[dat$Seqs == seq] <- score[[1]]
+  
+}
+```
+
+#Save weighting
+
+```{r}
+setwd(wd)
+dat <- apply(dat, 2, as.character)
+write.table(dat, file = 'NaiveWeightingData.csv', sep = ',', row.names = F)
+dat <- as.data.frame(dat)
+dat$Seqs <- toString(dat$Seqs)
+dat$Score <- as.numeric(dat$Score)
+```
+
+
+#Read in weighting data
+
+```{r}
+setwd(wd)
+
+dat <- read.csv('NaiveWeightingData.csv', stringsAsFactors = F)
+```
+
+
+#Calculate weights - method 2
+
+```{r}
+#Method 2
+
+dat$Weights <- NA
+
+#Set to 0.1 - based on paper
+K <- 0.05
+
+#W = e( w-S * ln(K)/w-b )
+#W = Weight
+#w = Worst scoring sequence in the training set
+#b = Best scoring sequence in the training set
+#S = Sequence log odds score
+#K = Weight of the best scoring sequence (user defined)
+
+dat$Weights <- exp((min(dat$Score)-dat$Score) * (log(K)/(min(dat$Score)-max(dat$Score))))
+
+```
+
+#Calculate weights - method 2
+
+```{r}
+#Method 2
+
+#dat$Weights <- NA
+
+#K <- 0.05
+
+##W = e( w-S * ln(K)/w-b )
+##below 3 deviations from median -> W = 1 - S - w/b - w
+##uses median absoloute deviation
+
+##W = Weight
+##w = Worst scoring sequence in the training set
+##b = Best scoring sequence in the training set
+##S = Sequence log odds score
+##K = Weight of the best scoring sequence (user defined)
+
+#dat$Weights <- exp((min(dat$Score)-dat$Score) * (log(K)/(min(dat$Score)-max(dat$Score))))
+#dat$Weights[dat$Score < (median(dat$Score)-(mad(dat$Score)*3))] <- (1 - ((dat$Score[dat$Score < (median(dat$Score)-(mad(dat$Score)*3))]-min(dat$Score))/(max(dat$Score-min(dat$Score)))))
+
+```
+
+
+#Update weighting
+
+```{r}
+setwd(wd)
+write.table(dat, file = 'NaiveWeightingData.csv', sep = ',', row.names = F)
+```
+
+
+#Test
+```{r}
+temp <- dat[head(sample(1:length(dat$Score)), 100000),]
+
+temp.seqs <- sapply(as.list(as.character(unlist(temp$Seqs))), strsplit, split='')
+temp.weights <- temp$Weights
+
+temp.PHMM <- derivePHMM(temp.seqs, refine = 'BaumWelch', residues = "AMINO", seqweights = temp.weights, maxiter = 5000, cores = 4)
+
+plot.PHMM(temp.PHMM)
+
+
+```
+
+
+
+# Retrain model using weights
+
+```{r}
+dat.seqs <- sapply(as.list(as.character(unlist(dat$Seqs))), strsplit, split='')
+dat.weights <- dat$Weights
+
+#Bug where weights below ~ 0.5 cause HMM model iterations to not improve alignment or PHMM. wfactor corrects the dat.weights alteration where...
+#seq.weights = seq.weights * wfactor
+dat.PHMM <- derivePHMM(dat.seqs, residues = "AMINO", seqweights = dat.weights*10, wfactor = 0.1, cores = 4)
+
+plot.PHMM(dat.PHMM)
+```
+
+
+# Save model as weighted naive model
+
+```{r}
+setwd(wd)
+
+writePHMM(dat.PHMM, 'NaiveSingletsModelWeighted2')
+```
+

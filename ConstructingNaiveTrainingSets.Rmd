@@ -1,0 +1,51 @@
+---
+title: "Constructing Naive TCR Training Sets"
+author: "Ben Margetts"
+date: "09/10/2017"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document: default
+---
+
+```{r}
+library(aphid)
+library(stringi)
+library(ape)
+```
+
+```{r}
+wd <- '/Users/benmargetts/Google/TCR/HMMs/Data/CD45RApos'
+setwd(wd)
+
+files <- list.files(wd, pattern='*.cdr3.gz')
+
+cdr3Dat <- data.frame(vector(), vector(), vector())
+
+names(cdr3Dat) <- c('Seq', 'Freq', 'Name')
+
+for (file in files){
+  tempDat <- read.csv(file, header = F, stringsAsFactors = F)
+  tempDat$Name <- file
+  names(tempDat) <- c('Seq', 'Freq', 'Name')
+  
+  cdr3Dat <- rbind(cdr3Dat, tempDat)
+}
+
+```
+
+
+```{r}
+#Unique sequences with frequency === 1 in a sample
+out <- '/Users/benmargetts/Google/TCR/HMMs/Data/NaiveTrainingSets'
+singlets <- cdr3Dat[cdr3Dat$Freq<2,]
+singlets <- singlets[1:2]
+singlets <- unique(singlets)
+write.table(singlets[1], paste(out, '/singlets.csv', sep = ''), col.names = F, row.names = F, sep = ',')
+```
+
+```{r}
+all <- cdr3Dat[1]
+all <- unique(all)
+write.table(all, paste(out, '/all.csv', sep = ''), col.names = F, row.names = F, sep = ',')
+```

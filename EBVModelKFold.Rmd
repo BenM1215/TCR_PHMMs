@@ -1,0 +1,840 @@
+---
+title: "EBV Model K Fold"
+author: "Ben Margetts"
+date: "05/12/2017"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document: default
+---
+
+```{r}
+library(aphid)
+library(stringi)
+library(ape)
+library(ggplot2)
+```
+
+```{r}
+derivePHMM1 <- function (x, progressive = FALSE, seeds = NULL, refine = "Viterbi", 
+  maxiter = 100, deltaLL = 1e-07, seqweights = "Gerstein", 
+  wfactor = 1, k = 5, residues = NULL, gap = "-", pseudocounts = "background", 
+  logspace = TRUE, qa = NULL, qe = NULL, maxsize = NULL, inserts = "map", 
+  lambda = 0, DI = FALSE, ID = FALSE, threshold = 0.5, omit.endgaps = FALSE, 
+  name = NULL, description = NULL, compo = FALSE, consensus = FALSE, 
+  alignment = FALSE, cpp = TRUE, cores = 1, quiet = FALSE, 
+  ...) 
+  {
+    nseq <- length(x)
+    DNA <- .isDNA1(x)
+    AA <- .isAA1(x)
+    if (DNA) 
+      class(x) <- "DNAbin"
+    else if (AA) 
+      class(x) <- "AAbin"
+    residues <- .alphadetect1(x, residues = residues, gap = gap)
+    gap <- if (AA) 
+      as.raw(45)
+    else if (DNA) 
+      as.raw(4)
+    else gap
+    for (i in 1:nseq) x[[i]] <- x[[i]][x[[i]] != gap]
+    if (inherits(cores, "cluster")) {
+      para <- TRUE
+      stopclustr <- FALSE
+    }
+    else if (cores == 1) {
+      para <- FALSE
+      stopclustr <- FALSE
+    }
+    else {
+      navailcores <- parallel::detectCores()
+      if (identical(cores, "autodetect")) 
+        cores <- navailcores - 1
+      if (cores > 1) {
+        if (!quiet) 
+          cat("Multithreading over", cores, "cores\n")
+        cores <- parallel::makeCluster(cores)
+        para <- TRUE
+        stopclustr <- TRUE
+      }
+      else {
+        para <- FALSE
+        stopclustr <- FALSE
+      }
+    }
+    if (nseq > 2) {
+      if (progressive) {
+        catchnames <- names(x)
+        names(x) <- paste0("S", 1:nseq)
+        if (is.null(seeds)) 
+          seeds <- seq_along(x)
+        stopifnot(mode(seeds) %in% c("numeric", "integer"), 
+          max(seeds) <= nseq, min(seeds) > 0)
+        if (is.null(seqweights)) {
+          seqweights <- rep(1, nseq)
+          names(seqweights) <- catchnames
+        }
+        else if (identical(seqweights, "Gerstein")) {
+          if (!quiet) 
+            cat("Calculating sequence weights\n")
+          seqweights <- weight(x, method = "Gerstein", 
+            k = k, residues = residues, gap = gap)
+          names(seqweights) <- catchnames
+        }
+        else {
+          stopifnot(mode(seqweights) %in% c("numeric", 
+            "integer"), length(seqweights) == nseq)
+        }
+        guidetree <- phylogram::topdown(x[seeds], k = k, 
+          residues = residues, gap = gap)
+        attachseqs <- function(tree, sequences) {
+          if (!is.list(tree)) {
+            attr(tree, "seqs") <- sequences[[attr(tree, 
+              "label")]]
+          }
+          return(tree)
+        }
+        guidetree <- dendrapply(guidetree, attachseqs, sequences = x)
+        progressive2 <- function(tree, maxsize, ...) {
+          if (is.list(tree)) {
+            if (!is.null(attr(tree[[1]], "seqs")) & !is.null(attr(tree[[2]], 
+              "seqs"))) {
+              attr(tree, "seqs") <- align.default(attr(tree[[1]], 
+                "seqs"), attr(tree[[2]], "seqs"), maxsize = maxsize, 
+                ... = ...)
+              attr(tree[[1]], "seqs") <- attr(tree[[2]], 
+                "seqs") <- NULL
+            }
+          }
+          return(tree)
+        }
+        progressive1 <- function(tree, maxsize, ...) {
+          tree <- progressive2(tree, maxsize = maxsize, 
+            ... = ...)
+          if (is.list(tree)) 
+            tree[] <- lapply(tree, progressive1, maxsize = maxsize, 
+              ... = ...)
+          return(tree)
+        }
+        if (!quiet) 
+          cat("Progressively aligning sequences\n")
+        while (is.null(attr(guidetree, "seqs"))) {
+          guidetree <- progressive1(guidetree, maxsize = maxsize, 
+            ... = ...)
+        }
+        msa1 <- attr(guidetree, "seqs")
+        rownames(msa1) <- catchnames[match(rownames(msa1), 
+          paste0("S", 1:nseq))]
+        names(x) <- catchnames
+      }
+      else {
+        if (is.null(seqweights)) {
+          seqweights <- rep(1, nseq)
+          names(seqweights) <- names(x)
+        }
+        else if (identical(seqweights, "Gerstein")) {
+          seqweights <- weight(x, method = "Gerstein", 
+            k = k, residues = residues, gap = gap)
+        }
+        else {
+          stopifnot(mode(seqweights) %in% c("numeric", 
+            "integer"), length(seqweights) == nseq)
+        }
+        xlengths <- sapply(x, length)
+        lm <- as.numeric(names(sort(table(xlengths), decreasing = TRUE)[1]))
+        if (!is.null(maxsize)) {
+          xlengths2 <- xlengths[xlengths <= maxsize]
+          if (length(xlengths2) == 0) 
+            stop("maxsize parameter is too low")
+          if (lm > maxsize) 
+            lm <- max(xlengths2)
+        }
+        longl <- xlengths == lm
+        seeds <- which.min(seqweights[longl])
+        if (length(seeds) > 1) 
+          seeds <- sample(seeds, size = 1)
+        seed <- x[longl][[seeds]]
+        msa1 <- matrix(seed, nrow = 1)
+        colnames(msa1) <- paste(1:ncol(msa1))
+      }
+    }
+    else if (nseq == 2) {
+      if (!quiet) 
+        cat("Aligning seed sequences\n")
+      msa1 <- align.default(x[[1]], x[[2]], residues = residues, 
+        gap = gap, ... = ...)
+      seqweights <- c(1, 1)
+      rownames(msa1) <- names(seqweights) <- names(x)
+      seeds <- 1:2
+    }
+    else if (nseq == 1) {
+      msa1 <- matrix(x[[1]], nrow = 1)
+      colnames(msa1) <- paste(1:ncol(msa1))
+      seqweights <- 1
+      rownames(msa1) <- names(seqweights) <- names(x)
+      seeds <- 1
+    }
+    else stop("Empty list")
+    if (!quiet) 
+      cat("Deriving profile HMM\n")
+    model <- derivePHMM.default(msa1, seqweights = seqweights[seeds], 
+      wfactor = wfactor, k = k, residues = residues, gap = gap, 
+      pseudocounts = pseudocounts, logspace = logspace, qa = qa, 
+      qe = qe, DI = DI, ID = ID, omit.endgaps = omit.endgaps, 
+      maxsize = maxsize, inserts = inserts, lambda = lambda, 
+      threshold = threshold, name = name, description = description, 
+      compo = compo, consensus = consensus, alignment = alignment, 
+      cpp = cpp, quiet = quiet)
+    if (nseq < 3) {
+      if (!quiet) 
+        cat("Done\n")
+      return(model)
+    }
+    if (is.null(refine)) 
+      refine <- "none"
+    if (refine %in% c("Viterbi", "BaumWelch")) {
+      if (!quiet) 
+        cat("Refining model\n")
+      model <- train.PHMM1(model, x, seqweights = seqweights, 
+        method = refine, maxiter = maxiter, deltaLL = deltaLL, 
+        pseudocounts = pseudocounts, maxsize = maxsize, 
+        inserts = inserts, lambda = lambda, threshold = threshold, 
+        alignment = alignment, cores = cores, quiet = quiet, 
+        cpp = cpp, ... = ...)
+    }
+    else {
+      stopifnot(identical(refine, "none"))
+      if (length(seeds) < nseq) 
+        attr(model, "alignment") <- NULL
+    }
+    if (para & stopclustr) 
+      parallel::stopCluster(cores)
+    if (!quiet) 
+      cat("Done\n")
+    return(model)
+}
+```
+
+```{r}
+train.PHMM1 <- function (x, y, method = "Viterbi", seqweights = "Gerstein", 
+    wfactor = 1, k = 5, logspace = "autodetect", maxiter = 100, 
+    deltaLL = 1e-07, pseudocounts = "background", gap = "-", 
+    fixqa = FALSE, fixqe = FALSE, maxsize = NULL, inserts = "map", 
+    threshold = 0.5, lambda = 0, alignment = FALSE, cores = 1, 
+    quiet = FALSE, ...) 
+  {
+  modelvec <- vector()
+    if (identical(logspace, "autodetect")) 
+      logspace <- .logdetect1(x)
+    DNA <- .isDNA1(y)
+    AA <- .isAA1(y)
+    DI <- !all(x$A["DI", ] == if (logspace) -Inf else 0)
+    ID <- !all(x$A["ID", ] == if (logspace) -Inf else 0)
+    gap <- if (DNA) 
+      as.raw(4)
+    else if (AA) 
+      as.raw(45)
+    else gap
+    if (!is.list(y)) {
+      y <- if (is.null(dim(y))) 
+        list(y)
+      else unalign(y, gap = gap)
+    }
+    n <- length(y)
+    if (is.null(seqweights)) {
+      seqweights <- rep(1, n)
+    }
+    else if (identical(seqweights, "Gerstein")) {
+      if (n > 2) 
+        seqweights <- if (n > 2) {
+          weight(y, k = k, gap = gap)
+        }
+        else rep(1, n)
+    }
+    else {
+      stopifnot(length(seqweights) == n, !any(is.na(seqweights)), 
+        mode(seqweights) %in% c("numeric", "integer"))
+    }
+    seqweights <- seqweights * wfactor
+    states <- c("D", "M", "I")
+    residues <- rownames(x$E)
+    l <- x$size
+    if (!logspace) {
+      x$E <- log(x$E)
+      x$A <- log(x$A)
+    }
+    if (!is.null(x$qe)) {
+      if (!logspace) 
+        x$qe <- log(x$qe)
+    }
+    else {
+      allecs <- if (DNA) {
+        apply(t(sapply(y, .tabulateDNA, ambiguities = TRUE)) * 
+          seqweights, 2, sum) + 1
+      }
+      else if (AA) {
+        apply(t(sapply(y, .tabulateAA, ambiguities = TRUE)) * 
+          seqweights, 2, sum) + 1
+      }
+      else {
+        apply(t(sapply(y, .tabulateCH, residues = residues)) * 
+          seqweights, 2, sum) + 1
+      }
+      x$qe <- log(allecs/sum(allecs))
+    }
+    if (!is.null(x$qa)) {
+      if (!logspace) 
+        x$qa <- log(x$qa)
+    }
+    else {
+      alig <- align(y, x, ... = ...)
+      gaps <- alig == gap
+      insrts <- apply(gaps, 2, sum) > 0.5 * n
+      xtr <- matrix(nrow = n, ncol = ncol(alig))
+      insertsn <- matrix(rep(insrts, n), nrow = n, byrow = T)
+      xtr[gaps & !insertsn] <- 0L
+      xtr[!gaps & !insertsn] <- 1L
+      xtr[!gaps & insertsn] <- 2L
+      xtr <- cbind(1L, xtr, 1L)
+      tcs <- .atab(xtr, seqweights = seqweights)
+      transtotals <- apply(tcs, 1, sum) + 1
+      if (!DI) 
+        transtotals[3] <- 0
+      if (!ID) 
+        transtotals[7] <- 0
+      x$qa <- log(transtotals/sum(transtotals))
+    }
+    if (method == "Viterbi") {
+      if (inherits(cores, "cluster")) {
+        para <- TRUE
+        stopclustr <- FALSE
+      }
+      else if (cores == 1) {
+        para <- FALSE
+        stopclustr <- FALSE
+      }
+      else {
+        navailcores <- parallel::detectCores()
+        if (identical(cores, "autodetect")) 
+          cores <- navailcores - 1
+        if (cores > 1) {
+          if (!quiet) 
+            cat("Multithreading over", cores, "cores\n")
+          cores <- parallel::makeCluster(cores)
+          para <- TRUE
+          stopclustr <- TRUE
+        }
+        else {
+          para <- FALSE
+          stopclustr <- FALSE
+        }
+      }
+      alig <- align.list(y, model = x, logspace = TRUE, cores = cores, 
+        ... = ...)
+      alig_cache <- character(maxiter)
+      alig_cache[1] <- .digest(alig, simplify = TRUE)
+      for (i in 1:maxiter) {
+        out <- derivePHMM.default(alig, seqweights = seqweights, 
+          residues = residues, gap = gap, DI = DI, ID = ID, 
+          maxsize = maxsize, inserts = inserts, lambda = lambda, 
+          threshold = threshold, pseudocounts = pseudocounts, 
+          logspace = TRUE, alignment = alignment, qa = if (fixqa) 
+            x$qa
+          else NULL, qe = if (fixqe) 
+            x$qe
+          else NULL)
+        if (!quiet) {
+          cat("Iteration", i)
+          cat(": alignment with", nrow(alig), "rows &", 
+            ncol(alig), "columns, ")
+          cat("PHMM with", out$size, "modules\n")
+        }
+        newalig <- align(y, model = out, logspace = TRUE, 
+          cores = cores, ... = ...)
+        newhash <- .digest(newalig, simplify = TRUE)
+        if (!any(sapply(alig_cache, identical, newhash))) {
+          alig_cache[i + 1] <- newhash
+          alig <- newalig
+          rm(newalig)
+          gc()
+        }
+        else {
+          if (!logspace) {
+            out$A <- exp(out$A)
+            out$E <- exp(out$E)
+            out$qa <- exp(out$qa)
+            out$qe <- exp(out$qe)
+          }
+          if (!quiet) 
+            cat("Sequential alignments were identical after", 
+              i, "iterations\n")
+          if (para & stopclustr) 
+            parallel::stopCluster(cores)
+          return(out)
+        }
+      }
+      if (!quiet) 
+        cat("Sequential alignments were not identical after", 
+          i, "iterations\n")
+      if (para & stopclustr) 
+        parallel::stopCluster(cores)
+      return(out)
+    }
+    else if (method == "BaumWelch") {
+      if (DNA) {
+        NUCorder <- sapply(toupper(rownames(x$E)), match, 
+          c("A", "T", "G", "C"))
+        x$E <- x$E[NUCorder, ]
+        x$qe <- x$qe[NUCorder]
+        if (!(identical(toupper(rownames(x$E)), c("A", "T", 
+          "G", "C")))) {
+          stop("Invalid model for DNA, residue alphabet does not correspond to\n              nucleotide alphabet")
+        }
+        y <- .encodeDNA(y, arity = 4, probs = exp(x$qe), 
+          random = FALSE, na.rm = TRUE)
+      }
+      else if (AA) {
+        PFAMorder <- sapply(toupper(rownames(x$E)), match, 
+          LETTERS[-c(2, 10, 15, 21, 24, 26)])
+        x$E <- x$E[PFAMorder, ]
+        x$qe <- x$qe[PFAMorder]
+        if (!(identical(toupper(rownames(x$E)), LETTERS[-c(2, 
+          10, 15, 21, 24, 26)]))) {
+          stop("Invalid model for AA, residue alphabet does not correspond to\n              20-letter amino acid alphabet")
+        }
+        y <- .encodeAA(y, arity = 20, probs = exp(x$qe), 
+          random = FALSE, na.rm = TRUE)
+      }
+      else {
+        y <- lapply(y, function(s) match(s[s != gap], residues) - 
+          1)
+        if (any(is.na(unlist(y, use.names = FALSE)))) {
+          stop("Residues in sequence(s) are missing from the model")
+        }
+      }
+      Apseudocounts <- x$A
+      Epseudocounts <- x$E
+      qepseudocounts <- x$qe
+      if (identical(pseudocounts, "background")) {
+        qepseudocounts <- exp(x$qe) * length(x$qe)
+        Epseudocounts[] <- rep(qepseudocounts, l)
+        qacounts <- exp(x$qa) * if (DI & ID) 
+          9
+        else if (DI | ID) 
+          8
+        else 7
+        Apseudocounts[] <- rep(qacounts, l + 1)
+      }
+      else if (identical(pseudocounts, "Laplace")) {
+        Apseudocounts[] <- Epseudocounts[] <- qepseudocounts[] <- 1
+      }
+      else if (identical(pseudocounts, "none")) {
+        Apseudocounts[] <- Epseudocounts[] <- qepseudocounts[] <- 0
+      }
+      else if (is.list(pseudocounts)) {
+        stopifnot(length(pseudocounts) == 3)
+        stopifnot(identical(dim(pseudocounts[[1]]), dim(x$A)))
+        stopifnot(identical(dim(pseudocounts[[2]]), dim(x$E)))
+        stopifnot(identical(length(pseudocounts[[3]]), length(x$qe)))
+        Apseudocounts[] <- pseudocounts[[1]]
+        Epseudocounts[] <- pseudocounts[[2]]
+        qepseudocounts[] <- pseudocounts[[3]]
+      }
+      else stop("Invalid 'pseudocounts' argument")
+      Apseudocounts[1:3, 1] <- Apseudocounts[c(1, 4, 7), l + 
+        1] <- 0
+      if (!DI) 
+        Apseudocounts["DI", ] <- 0
+      if (!ID) 
+        Apseudocounts["ID", ] <- 0
+      E <- x$E
+      A <- x$A
+      qe <- x$qe
+      LL <- -1e+12
+      out <- x
+      for (i in 1:maxiter) {
+        tmpA <- Apseudocounts
+        tmpE <- Epseudocounts
+        tmpqe <- qepseudocounts
+        tmplogPx <- rep(NA, n)
+        for (j in 1:n) {
+          yj <- y[[j]]
+          nj <- length(yj)
+          if (nj == 0) {
+            tmpA["DD", 2:(ncol(tmpA) - 1)] <- tmpA["DD", 
+              2:(ncol(tmpA) - 1)] + seqweights[j]
+            tmplogPx[j] <- sum(c(A["MD", 1], A["DD", 2:l], 
+              A["DM", l + 1]))
+          }
+          else {
+            forwj <- forward(out, yj, logspace = TRUE, 
+              odds = FALSE, ... = ...)
+            Rj <- forwj$array
+            logPxj <- forwj$score
+            tmplogPx[j] <- logPxj
+            backj <- backward(out, yj, logspace = TRUE, 
+              odds = FALSE, ... = ...)
+            Bj <- backj$array
+            tmpEj <- tmpE
+            tmpAj <- tmpA
+            tmpqej <- tmpqe
+            tmpEj[] <- tmpAj[] <- tmpqej[] <- 0
+            yj <- yj + 1
+            yjea <- cbind(FALSE, sapply(yj, function(r) 1:length(residues) == 
+              r))
+            for (k in 1:l) {
+              for (a in seq_along(residues)) {
+                if (any(yjea[a, ])) {
+                  tmpEj[a, k] <- exp(logsum(Rj[k + 1, 
+                    yjea[a, ], "M"] + Bj[k + 1, yjea[a, 
+                    ], "M"]) - logPxj)
+                  tmpqej[a] <- exp(logsum(Rj[k + 1, yjea[a, 
+                    ], "I"] + Bj[k + 1, yjea[a, ], "I"]) - 
+                    logPxj)
+                }
+              }
+              tmpAj["DD", k] <- exp(logsum(Rj[k, , "D"] + 
+                A["DD", k] + Bj[k + 1, , "D"]) - logPxj)
+              tmpAj["MD", k] <- exp(logsum(Rj[k, , "M"] + 
+                A["MD", k] + Bj[k + 1, , "D"]) - logPxj)
+              if (ID) 
+                tmpAj["ID", k] <- exp(logsum(Rj[k, , "I"] + 
+                  A["ID", k] + Bj[k + 1, , "D"]) - logPxj)
+              tmpAj["DM", k] <- exp(logsum(Rj[k, , "D"] + 
+                A["DM", k] + c(E[yj, k], -Inf) + c(Bj[k + 
+                1, -1, "M"], -Inf)) - logPxj)
+              tmpAj["MM", k] <- exp(logsum(Rj[k, , "M"] + 
+                A["MM", k] + c(E[yj, k], -Inf) + c(Bj[k + 
+                1, -1, "M"], -Inf)) - logPxj)
+              tmpAj["IM", k] <- exp(logsum(Rj[k, , "I"] + 
+                A["IM", k] + c(E[yj, k], -Inf) + c(Bj[k + 
+                1, -1, "M"], -Inf)) - logPxj)
+              if (DI) 
+                tmpAj["DI", k] <- exp(logsum(Rj[k, , "D"] + 
+                  A["DI", k] + c(qe[yj], -Inf) + c(Bj[k, 
+                  -1, "I"], -Inf)) - logPxj)
+              tmpAj["MI", k] <- exp(logsum(Rj[k, , "M"] + 
+                A["MI", k] + c(qe[yj], -Inf) + c(Bj[k, 
+                -1, "I"], -Inf)) - logPxj)
+              tmpAj["II", k] <- exp(logsum(Rj[k, , "I"] + 
+                A["II", k] + c(qe[yj], -Inf) + c(Bj[k, 
+                -1, "I"], -Inf)) - logPxj)
+            }
+            k <- l + 1
+            tmpAj["DM", k] <- exp(Rj[k, nj + 1, "D"] + 
+              A["DM", k] - logPxj)
+            tmpAj["MM", k] <- exp(Rj[k, nj + 1, "M"] + 
+              A["MM", k] - logPxj)
+            tmpAj["IM", k] <- exp(Rj[k, nj + 1, "I"] + 
+              A["IM", k] - logPxj)
+            if (DI) 
+              tmpAj["DI", k] <- exp(logsum(Rj[k, , "D"] + 
+                A["DI", k] + c(qe[yj], -Inf) + c(Bj[k, 
+                -1, "I"], -Inf)) - logPxj)
+            tmpAj["MI", k] <- exp(logsum(Rj[k, , "M"] + 
+              A["MI", k] + c(qe[yj], -Inf) + c(Bj[k, -1, 
+              "I"], -Inf)) - logPxj)
+            tmpAj["II", k] <- exp(logsum(Rj[k, , "I"] + 
+              A["II", k] + c(qe[yj], -Inf) + c(Bj[k, -1, 
+              "I"], -Inf)) - logPxj)
+            tmpA <- tmpA + tmpAj * seqweights[j]
+            tmpE <- tmpE + tmpEj * seqweights[j]
+            tmpqe <- tmpqe + tmpqej * seqweights[j]
+          }
+        }
+        tmpE <- t(tmpE)
+        tmpE <- log(tmpE/apply(tmpE, 1, sum))
+        tmpE <- t(tmpE)
+        tmpqe <- log(tmpqe/sum(tmpqe))
+        tmpA <- t(tmpA)
+        for (X in c(1, 4, 7)) tmpA[, X:(X + 2)] <- log(tmpA[, 
+          X:(X + 2)]/apply(tmpA[, X:(X + 2)], 1, sum))
+        tmpA <- t(tmpA)
+        tmpA[1:3, 1] <- -Inf
+        A <- tmpA
+        E <- tmpE
+        if (!fixqe) 
+          qe <- tmpqe
+        out$A <- A
+        out$E <- E
+        if (!fixqe) 
+          out$qe <- qe
+        logPx <- sum(tmplogPx)
+        if (!quiet) 
+          cat("Iteration", i, "log likelihood =", logPx, 
+            "\n")
+        if (!logspace) {
+          out$A <- exp(out$A)
+          out$E <- exp(out$E)
+          out$qe <- exp(out$qe)
+        }
+        if (DNA) {
+          out$E <- out$E[NUCorder, ]
+          out$qe <- out$qe[NUCorder]
+        }
+        else if (AA) {
+          out$E <- out$E[PFAMorder, ]
+          out$qe <- out$qe[PFAMorder]
+        }
+        modelvec <- append(modelvec, list(out))
+
+        if (abs(LL - logPx) < deltaLL) {
+          if (!quiet) 
+            cat("Convergence threshold reached after", 
+              i, "EM iterations\n")
+          return(modelvec)
+        }
+        LL <- logPx
+        gc()
+      }
+      warning("Failed to converge. Try increasing 'maxiter' or modifying start parameters")
+      if (!logspace) {
+        out$A <- exp(out$A)
+        out$E <- exp(out$E)
+        out$qe <- exp(out$qe)
+      }
+      if (DNA) {
+        out$E <- out$E[NUCorder, ]
+        out$qe <- out$qe[NUCorder]
+      }
+      else if (AA) {
+        out$E <- out$E[PFAMorder, ]
+        out$qe <- out$qe[PFAMorder]
+      }
+      return(modelvec)
+    }
+    else stop("Invalid argument given for 'method'")
+}
+```
+
+
+```{r}
+.isDNA1 <- function (x) 
+  {
+      if (inherits(x, "DNAbin")) {
+          return(TRUE)
+      }
+      else if (inherits(x, "AAbin")) {
+          return(FALSE)
+      }
+      else if (mode(x) == "character") {
+          return(FALSE)
+      }
+      else if (mode(x) == "raw") {
+          return(all(x %in% as.raw(c(136, 72, 40, 24, 192, 160, 
+              144, 96, 80, 48, 224, 176, 208, 112, 240, 4, 2))))
+      }
+      else if (mode(x) == "list") {
+          if (length(x) > 0) {
+              return(all(unlist(x, use.names = FALSE) %in% as.raw(c(136, 
+                  72, 40, 24, 192, 160, 144, 96, 80, 48, 224, 176, 
+                  208, 112, 240, 4, 2))))
+          }
+          else {
+              return(FALSE)
+          }
+      }
+      else {
+          return(FALSE)
+      }
+  }
+
+```
+
+
+```{r}
+.isAA1 <- function (x) 
+  {
+      if (inherits(x, "AAbin")) {
+          return(TRUE)
+      }
+      else if (inherits(x, "DNAbin")) {
+          return(FALSE)
+      }
+      else if (mode(x) == "character") {
+          return(FALSE)
+      }
+      else if (mode(x) == "raw") {
+          return(all(x %in% as.raw(c(65:90, 42, 45, 63))))
+      }
+      else if (mode(x) == "list") {
+          if (length(x) > 0) {
+              return(all(unlist(x, use.names = FALSE) %in% as.raw(c(65:90, 
+                  42, 45, 63))))
+          }
+          else {
+              return(FALSE)
+          }
+      }
+      else {
+          return(FALSE)
+      }
+  }
+```
+
+```{r}
+.alphadetect1 <- function (sequences, residues = NULL, gap = "-", endchar = "?") 
+  {
+      if (identical(toupper(residues), "RNA")) {
+          residues <- c("A", "C", "G", "U")
+      }
+      else if (.isDNA1(sequences) | identical(toupper(residues), 
+          "DNA")) {
+          residues <- c("A", "C", "G", "T")
+      }
+      else if (.isAA1(sequences) | identical(residues, "AA") | identical(toupper(residues), 
+          "AMINO")) {
+          residues <- LETTERS[-c(2, 10, 15, 21, 24, 26)]
+      }
+      else if (is.null(residues)) {
+          residues <- sort(unique(as.vector(unlist(sequences, use.names = FALSE))))
+          if (!is.null(gap)) 
+              residues <- residues[residues != gap]
+          if (!is.null(endchar)) 
+              residues <- residues[residues != endchar]
+      }
+      else {
+          if (!is.null(gap)) 
+              residues <- residues[residues != gap]
+          if (!is.null(endchar)) 
+              residues <- residues[residues != endchar]
+      }
+      if (!(length(residues) > 0)) {
+          stop("invalid residues argument")
+      }
+      return(residues)
+  }
+```
+
+```{r}
+.logdetect1 <- function (x) 
+  {
+      if (inherits(x, "HMM")) {
+          if (all(x$A <= 0) & all(x$E <= 0)) {
+              return(TRUE)
+          }
+          else if (all(x$A >= 0) & all(x$A <= 1) & all(x$E >= 0) & 
+              all(x$E <= 1)) {
+              return(FALSE)
+          }
+          else stop("unable to detect if model probabilities are in log space")
+      }
+      else if (inherits(x, "PHMM")) {
+          if (all(x$A <= 0) & all(x$E <= 0) & all(x$qa <= 0) & 
+              all(x$qe <= 0)) {
+              return(TRUE)
+          }
+          else if (all(x$A >= 0) & all(x$A <= 1) & all(x$E >= 0) & 
+              all(x$E <= 1) & all(x$qa >= 0) & all(x$qa <= 1) & 
+              all(x$qe >= 0) & all(x$qe <= 1)) {
+              return(FALSE)
+          }
+          else stop("unable to detect if model probabilities are in log space")
+      }
+      else stop("x must be an object of class 'HMM' or 'PHMM'")
+  }
+```
+
+
+
+
+
+CODE TO RUN BAUM WELCH ALGO BELOW
+
+
+
+```{r}
+wd <- '/Users/benmargetts/Google/TCR/HMMs/Data/EBVVDJDB'
+setwd(wd)
+
+dat <- read.csv('SearchTable-2017-10-31 13_08_21.375.txt', header = T, stringsAsFactors = F, sep = '\t')
+dat <- dat[,2]
+```
+
+
+
+```{r}
+#Toy k fold validation example
+k <- 10
+
+#temp$
+
+temp <- dat
+
+temp.random <- temp[sample(seq(1,length(temp)), length(temp))] #randomised block
+
+temp.ks <- split(temp.random, ceiling(seq_along(temp.random)/(round(length(temp)/k)))) #split into k chunks
+
+#ith k
+ks <- list()
+models <- list()
+for (i in seq(1,k)){
+  start_time <- Sys.time()
+  print(i)
+    
+  test <- as.vector(unlist(temp.ks[i]))
+  test <- sapply(as.list(as.character(unlist(test))), strsplit, split='')
+  train <- as.vector(sapply(temp.ks[-i], unlist))
+  train <- sapply(as.list(as.character(unlist(train))), strsplit, split='')
+
+  
+  temp.PHMM <- derivePHMM1(train, refine = 'BaumWelch', residues = "AMINO", seqweights = NULL, maxiter = 2000, cores = 4, quiet = T)
+  
+  models <- append(models, list(temp.PHMM))
+  
+  scores <- list()
+  
+  #jth model iteration
+  for (j in seq(1,length(temp.PHMM))){
+      modelScores <- list()
+      
+      for (seq in test){
+        score <- forward.PHMM(temp.PHMM[[j]], seq)[[1]] 
+        modelScores <- append(modelScores, score) # Save the probability
+    }
+    scores <- append(scores, mean(unlist(modelScores))) #Mean log odds score? - unlog first?
+  }
+  
+  ks <- append(ks, list(scores))
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+}
+
+```
+```{r}
+output <- '/Users/benmargetts/Google/TCR/HMMs/Data/EBVModel/EBVKfold'
+setwd(output)
+for (i in seq(1,length(models))){
+  for (j in seq(1,length(models[[i]]))){
+    writePHMM(models[[i]][[j]], file = paste('model_',i,'_','iteratiion_',j, sep = ''))
+  }
+}
+```
+
+```{r}
+setwd(output)
+p <- vector()
+k <- vector()
+iteration <- vector()
+for (i in seq(1, length(ks))){
+  p <- append(p, unlist(ks[i]))
+  k <- append(k, rep(i, length(unlist(ks[i]))))
+  iteration <- append(iteration, seq(1, length(unlist(ks[i]))))
+}
+
+k <- data.frame(p, k, iteration)
+write.csv(k, 'modelRuns.csv', row.names = F)
+```
+
+
+```{r}
+setwd(output)
+ggp <- ggplot(data = k)+
+  geom_line(aes(y = p, x = iteration, group = k, colour = as.factor(k)))+
+  theme_classic()+
+  scale_x_log10(breaks = c(1,2,3,4,5,10,50,100,500,1000))+
+  labs(y = "Mean Log Odds Score of Test Set", x = "Model Iteration", colour = 'Model')
+ggsave('kfold_log10.pdf',plot = ggp, device = 'pdf', units = 'cm', height = 10, width = 14)
+```

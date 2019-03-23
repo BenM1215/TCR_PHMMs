@@ -1,0 +1,191 @@
+---
+title: "Dynamic classifier"
+author: "Ben Margetts"
+date: "01/11/2017"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document: default
+---
+
+```{r}
+library(aphid)
+library(ggplot2)
+library(reshape)
+```
+
+```{r results='hide', message=FALSE, warning=FALSE}
+'%!in%' <- function(x,y)!('%in%'(x,y))
+```
+
+Read in naive sequence trained HMM
+
+```{r}
+wd <- "/Users/benmargetts/Google/TCR/HMMs/Data/NaiveModel"
+setwd(wd)
+
+model <- readPHMM("naiveModel") #Naive model trained on all CD4+ naive cells, all seqs, not just uniques.
+
+```
+
+# Test 1
+```{r}
+numSeqs <- 100 # Number of sequences
+tLen <- 30 # PHMM sequence size (includes gap states)
+
+# Generate 100 sequences
+seqs <- vector()
+
+for (i in 1:numSeqs){
+  seqs <- append(seqs, paste(unlist(unalign(matrix(generate.PHMM(model, tLen), ncol=tLen))),collapse=''))
+}
+
+# Format them correctly
+seqs <- sapply(as.list(as.character(unlist(seqs))), strsplit, split='')
+
+# Create a list of PHMMs, trained on the seqs
+temp <- vector()
+for (i in 1:10){
+  temp <- append(temp, list(derivePHMM(seqs, residues = "AMINO", seqweights = NULL, quiet = T)))
+}
+
+# Sample the probability of a single sequence against each of the models
+for (i in 1:length(temp)){
+  print(forward(temp[[i]], seqs[[1]])[1])
+}
+```
+
+
+
+# Test 2 - build sequences
+```{r}
+numSeqs <- 50000 # Number of sequences
+tLen <- 30 # PHMM sequence size (includes gap states)
+
+# Generate sequences
+seqs <- vector()
+for (i in 1:numSeqs){
+  seqs <- append(seqs, paste(unlist(unalign(matrix(generate.PHMM(model, tLen), ncol=tLen))),collapse=''))
+}
+
+# Format sequences to go into dataframe
+seqs <- sapply(seqs, paste, collapse='')
+
+
+# Store sequences in data frame with model classification
+seq.dat <- data.frame(seqs, sample(1:10, length(seqs), replace = T), stringsAsFactors = F)
+colnames(seq.dat) <- c('seq', 'model')
+```
+
+
+# Test 2 - train model, regroup sequences into models - warmup iterations
+```{r}
+setwd('~/Google/TCR/HMMs/DynamicClassifier/Iteration')
+
+warmUpIterations <- 1
+
+for (iteration in 1:warmUpIterations){
+  
+  print(iteration)
+  
+  #Save current model assignments
+  write.csv(seq.dat, paste('warmupIterations', iteration, '.csv', sep = ''), row.names = F)
+  
+  # Train the models
+  temp <- vector()
+  counter <- 1 # Model index - matches model position in temp
+  print(paste('Training', length(unique(seq.dat$model)), 'Models - Iteration:', iteration))
+  for (m in unique(seq.dat$model)){
+    trainingSeqs <- seq.dat$seq[seq.dat$model==m]
+    trainingSeqs <- sapply(as.list(as.character(unlist(trainingSeqs))), strsplit, split='')
+    temp <- append(temp, list(derivePHMM(trainingSeqs, residues = "AMINO", seqweights = NULL, quiet = T, cores = 'autodetect')))
+    
+    seq.dat$model[seq.dat$model==m] <- counter
+    
+    counter <- counter +1
+  }
+  
+  # data frame to store next model assignments in
+  seq.dat.nextIteration <- seq.dat
+  
+  print(paste('Testing Sequences Against', length(unique(seq.dat$model)), 'Models - Iteration:', iteration))
+  # Loop through each sequence
+  for (i in seq.dat$seq){
+    scores <- vector() # save scores
+    models <- vector() # save models tested
+    tempSeq <- sapply(as.list(as.character(unlist(i))), strsplit, split='') # format the current sequence
+    
+    # Test the current sequence against each model
+    for(j in unique(seq.dat$model[seq.dat$seq!=i])){ # Don't test against the sequence's own model for the warm up runs
+      score <- forward(temp[[j]], tempSeq)[[1]] 
+      scores <- append(scores, score) # Save the probability
+      models <- append(models, j) # Save the model
+    }
+    
+    scoreIndex <- which(scores==max(scores)) # max score assigned
+    newModelAssignment <- models[scoreIndex]
+    
+    seq.dat.nextIteration$model[seq.dat.nextIteration$seq==i] <- newModelAssignment
+  }
+ # update data frame
+ seq.dat <- seq.dat.nextIteration
+ 
+}
+```
+
+# Test 2 - full run
+```{r}
+setwd('~/Google/TCR/HMMs/DynamicClassifier/Iteration')
+
+numIterations <- 100
+
+for (iteration in 1:numIterations){
+  
+  print(iteration)
+  
+  #Save current model assignments
+  write.csv(seq.dat, paste('Iterations', iteration, '.csv', sep = ''), row.names = F)
+  
+  # Train the models
+  temp <- vector()
+  counter <- 1 # Model index - matches model position in temp
+  for (m in unique(seq.dat$model)){
+    trainingSeqs <- seq.dat$seq[seq.dat$model==m]
+    trainingSeqs <- sapply(as.list(as.character(unlist(trainingSeqs))), strsplit, split='')
+    temp <- append(temp, list(derivePHMM(trainingSeqs, residues = "AMINO", seqweights = NULL, quiet = T)))
+    
+    seq.dat$model[seq.dat$model==m] <- counter
+    
+    counter <- counter +1
+  }
+  
+  # data frame to store next model assignments in
+  seq.dat.nextIteration <- seq.dat
+  
+  # Loop through each sequence
+  for (i in seq.dat$seq){
+    scores <- vector() # save scores
+    models <- vector() # save models tested
+    tempSeq <- sapply(as.list(as.character(unlist(i))), strsplit, split='') # format the current sequence
+    
+    # Test the current sequence against each model
+    for(j in unique(seq.dat$model)){
+      score <- forward(temp[[j]], tempSeq)[[1]] 
+      scores <- append(scores, score) # Save the probability
+      models <- append(models, j) # Save the model
+    }
+    
+    scoreIndex <- which(scores==max(scores)) # max score assigned
+    newModelAssignment <- models[scoreIndex]
+    
+    seq.dat.nextIteration$model[seq.dat.nextIteration$seq==i] <- newModelAssignment
+  }
+ # update data frame
+ seq.dat <- seq.dat.nextIteration
+ 
+}
+
+
+
+```
+
